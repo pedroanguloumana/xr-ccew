@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xr-ccew"
+version = "0.1.0"
+description = "Xarray tools for convectively coupled equatorial wave analysis."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Pedro" }
+]
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=1.5",
+  "xarray>=2023.1",
+]
+
+[project.optional-dependencies]
+dask = ["dask[array]>=2023.1"]
+plot = ["matplotlib>=3.7"]
+gallery = [
+  "ipykernel>=6",
+  "jupyterlab>=4",
+  "matplotlib>=3.7",
+  "netCDF4>=1.6",
+]
+dev = [
+  "pytest>=7",
+  "ruff>=0.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

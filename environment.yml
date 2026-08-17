@@ -1,0 +1,17 @@
+name: xr_ccew
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - pandas
+  - xarray
+  - dask
+  - matplotlib
+  - netcdf4
+  - jupyterlab
+  - ipykernel
+  - pytest
+  - pip
+  - pip:
+      - -e .
