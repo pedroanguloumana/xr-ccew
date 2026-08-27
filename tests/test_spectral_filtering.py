@@ -127,6 +127,94 @@ class IdentityPreservationTests(unittest.TestCase):
         self.assertEqual(da.attrs, before)
 
 
+class NonStandardCalendarTests(unittest.TestCase):
+    """CMIP output uses noleap and 360_day calendars, which xarray decodes to
+    cftime objects rather than datetime64."""
+
+    CALENDARS = ("proleptic_gregorian", "noleap", "360_day")
+
+    def _field(self, calendar, periods=800):
+        time = xr.date_range(
+            "2000-01-01",
+            periods=periods,
+            freq="D",
+            calendar=calendar,
+            use_cftime=(calendar != "proleptic_gregorian"),
+        )
+        lat = np.arange(-10.0, 10.1, 5.0)
+        lon = np.arange(0.0, 360.0, 20.0)
+        rng = np.random.default_rng(0)
+        return xr.DataArray(
+            rng.standard_normal((periods, lat.size, lon.size)),
+            dims=("time", "lat", "lon"),
+            coords={"time": time, "lat": lat, "lon": lon},
+            name="pr",
+        )
+
+    def test_pipeline_runs_on_every_calendar(self):
+        for calendar in self.CALENDARS:
+            with self.subTest(calendar=calendar):
+                da = self._field(calendar)
+                out = tw.remove_mean_and_linear_trend(da)
+                out = tw.remove_harmonics_of_seasonal_cycle(out, num_harmonics=3)
+                segments = tw.segment_data(out, segment_days=96, overlap_days=30)
+                self.assertGreater(len(segments), 0)
+                tapered = tw.apply_window(segments[0], dim="time", window="tukey", pct=0.1)
+                power = tw.power_spectrum(tapered)
+                self.assertTrue(np.isfinite(power).all())
+                filtered = tw.filter_field(out, "Kelvin")
+                self.assertEqual(filtered.shape, da.shape)
+                tw.add_time_days(segments[0])
+
+    def test_segmentation_matches_across_calendars(self):
+        counts = {
+            calendar: len(
+                tw.segment_data(
+                    self._field(calendar), segment_days=96, overlap_days=30
+                )
+            )
+            for calendar in self.CALENDARS
+        }
+        self.assertEqual(len(set(counts.values())), 1, counts)
+
+    def test_annual_cycle_removed_on_360_day_calendar(self):
+        """The regression that a hard-coded 365-day year would fail.
+
+        A 360_day model year scored against a 365-day period drifts five days
+        per year, so the fitted harmonic slips out of phase and a large part
+        of the seasonal cycle survives.
+        """
+        periods = 360 * 10
+        time = xr.date_range(
+            "2000-01-01", periods=periods, freq="D", calendar="360_day", use_cftime=True
+        )
+        day_of_year = np.asarray(time.dayofyear if hasattr(time, "dayofyear")
+                                 else [t.dayofyr for t in time], dtype=float)
+        amplitude = 5.0
+        seasonal = amplitude * np.sin(2 * np.pi * (day_of_year - 1) / 360.0)
+        da = xr.DataArray(seasonal, dims=("time",), coords={"time": time}, name="pr")
+        da = da.expand_dims(lat=[0.0]).transpose("time", "lat")
+
+        residual = tw.remove_harmonics_of_seasonal_cycle(da, num_harmonics=1)
+        self.assertLess(float(np.abs(residual).max()), 0.01 * amplitude)
+
+    def test_year_length_follows_the_calendar(self):
+        expected = {"proleptic_gregorian": 365.2425, "noleap": 365.0, "360_day": 360.0}
+        for calendar, days in expected.items():
+            with self.subTest(calendar=calendar):
+                da = self._field(calendar, periods=64)
+                self.assertAlmostEqual(tw.spectral._year_length(da.time), days)
+
+    def test_numeric_time_still_rejected(self):
+        da = xr.DataArray(
+            np.zeros((10, 1)),
+            dims=("time", "lat"),
+            coords={"time": np.arange(10.0), "lat": [0.0]},
+        )
+        with self.assertRaises(TypeError):
+            tw.remove_harmonics_of_seasonal_cycle(da, num_harmonics=1)
+
+
 if __name__ == "__main__":
     unittest.main()
 

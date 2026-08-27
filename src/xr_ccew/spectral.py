@@ -56,6 +56,61 @@ def symmetric_antisymmetric_component(
     return symmetric + antisymmetric
 
 
+# Days in a calendar year, keyed by the CF calendar name. The annual-cycle
+# harmonics are fitted against day-of-year, so the period has to be the year
+# length of the data's own calendar: a 360_day model run scored against a
+# 365-day year drifts a full five days per year and leaves a large residual
+# seasonal cycle behind.
+_CALENDAR_YEAR_LENGTH = {
+    "360_day": 360.0,
+    "365_day": 365.0,
+    "noleap": 365.0,
+    "366_day": 366.0,
+    "all_leap": 366.0,
+    "julian": 365.25,
+    "standard": 365.2425,
+    "gregorian": 365.2425,
+    "proleptic_gregorian": 365.2425,
+}
+
+_DEFAULT_YEAR_LENGTH = 365.2425
+
+
+def _year_length(coord: xr.DataArray) -> float:
+    """Days per year for the calendar of a time coordinate."""
+    calendar = getattr(coord.dt, "calendar", None) if hasattr(coord, "dt") else None
+    return _CALENDAR_YEAR_LENGTH.get(str(calendar), _DEFAULT_YEAR_LENGTH)
+
+
+def _is_datetime_like(values: np.ndarray) -> bool:
+    """True for numpy datetimes and for cftime objects (which are dtype=object)."""
+    return np.issubdtype(values.dtype, np.datetime64) or (
+        values.dtype == object and values.size > 0 and hasattr(values.flat[0], "timetuple")
+    )
+
+
+def _days_since_start(values: np.ndarray) -> np.ndarray:
+    """Days elapsed since the first sample.
+
+    Handles numpy datetime64, cftime datetimes under any CF calendar (which
+    xarray stores as an object array, and which subtract to
+    ``datetime.timedelta``), and coordinates that are already numeric.
+    """
+    values = np.asarray(values)
+    if values.size == 0:
+        return np.zeros(0, dtype=float)
+    if np.issubdtype(values.dtype, np.datetime64) or np.issubdtype(
+        values.dtype, np.timedelta64
+    ):
+        return np.asarray((values - values[0]) / np.timedelta64(1, "D"), dtype=float)
+    if values.dtype == object:
+        first = values[0]
+        return np.array(
+            [(value - first).total_seconds() / 86400.0 for value in values], dtype=float
+        )
+    return values.astype(float) - float(values[0])
+
+
 def _restore_identity(out: xr.DataArray, source: xr.DataArray) -> xr.DataArray:
     """Restore `source`'s name and attributes on a derived array.
 
@@ -102,8 +157,12 @@ def remove_harmonics_of_seasonal_cycle(
         return da
 
     t = da[time_dim]
-    if not np.issubdtype(t.dtype, np.datetime64):
-        raise TypeError("remove_harmonics_of_seasonal_cycle expects datetime64 time")
+    if not _is_datetime_like(np.asarray(t.values)):
+        raise TypeError(
+            "remove_harmonics_of_seasonal_cycle expects a datetime64 or cftime "
+            f"time coordinate; got dtype={t.dtype}"
+        )
+    year_length = _year_length(t)
 
     frac_day = (
         t.dt.hour / 24.0
@@ -112,7 +171,7 @@ def remove_harmonics_of_seasonal_cycle(
         + getattr(t.dt, "microsecond", 0) / 86400.0 / 1e6
     )
     doy0 = (t.dt.dayofyear - 1).astype(float)
-    theta = 2.0 * np.pi * (doy0 + frac_day) / 365.0
+    theta = 2.0 * np.pi * (doy0 + frac_day) / year_length
 
     cols = []
     for harmonic in range(1, num_harmonics + 1):
@@ -169,9 +228,11 @@ def segment_data(
     overlap_days: int = 30,
     time_dim: str = "time",
 ) -> list[xr.DataArray]:
-    """Split a datetime-indexed array into overlapping full-length segments."""
-    import pandas as pd
+    """Split a datetime-indexed array into overlapping full-length segments.
 
+    Segment boundaries are computed as day offsets from the first sample, so
+    this works for any CF calendar, not only the real-world one.
+    """
     if time_dim not in da.dims:
         raise ValueError(f"time_dim={time_dim!r} not in da.dims={da.dims}")
     if segment_days <= 0:
@@ -179,17 +240,22 @@ def segment_data(
     if overlap_days >= segment_days:
         raise ValueError("overlap_days must be smaller than segment_days")
 
-    earliest_day = pd.Timestamp(da[time_dim].min().item())
-    latest_day = pd.Timestamp(da[time_dim].max().item())
-    step = pd.Timedelta(days=segment_days - overlap_days)
-    segment = pd.Timedelta(days=segment_days)
-    total = latest_day - earliest_day
-    n_segments = max(0, int((total - segment) / step) + 1)
+    days = _days_since_start(np.asarray(da[time_dim].values))
+    if days.size == 0:
+        return []
 
-    return [
-        da.sel({time_dim: slice(earliest_day + i * step, earliest_day + i * step + segment)})
-        for i in range(n_segments)
-    ]
+    step = float(segment_days - overlap_days)
+    total = float(days[-1] - days[0])
+    n_segments = max(0, int((total - segment_days) / step) + 1)
+
+    segments = []
+    for i in range(n_segments):
+        start = i * step
+        # Inclusive of both endpoints, matching the label-based slice this
+        # replaces.
+        selected = np.flatnonzero((days >= start) & (days <= start + segment_days))
+        segments.append(da.isel({time_dim: selected}))
+    return segments
 
 
 def add_time_days(da: xr.DataArray, *, time_dim: str = "time") -> xr.DataArray:
@@ -197,10 +263,15 @@ def add_time_days(da: xr.DataArray, *, time_dim: str = "time") -> xr.DataArray:
     if time_dim not in da.dims:
         raise ValueError(f"time_dim={time_dim!r} not in da.dims={da.dims}")
     t = da[time_dim]
-    if not np.issubdtype(t.dtype, np.datetime64):
-        raise TypeError("add_time_days expects a datetime64 time coordinate")
+    values = np.asarray(t.values)
+    if not _is_datetime_like(values):
+        raise TypeError(
+            f"add_time_days expects a datetime64 or cftime time coordinate; got dtype={t.dtype}"
+        )
 
-    time_days = (t - t.isel({time_dim: 0})) / np.timedelta64(1, "D")
+    time_days = xr.DataArray(
+        _days_since_start(values), dims=(time_dim,), coords={time_dim: t}
+    )
     out = da.assign_coords(time_days=time_days).swap_dims({time_dim: "time_days"})
     out = out.drop_vars(time_dim)
     out["time_days"].attrs["units"] = "days since segment start"
@@ -455,14 +526,7 @@ def _coordinate_spacing_days(coord: xr.DataArray) -> float:
     if values.size < 2:
         raise ValueError(f"coordinate {coord.name!r} must contain at least two values")
 
-    if np.issubdtype(values.dtype, np.datetime64):
-        diffs = np.diff(values) / np.timedelta64(1, "D")
-    elif np.issubdtype(values.dtype, np.timedelta64):
-        diffs = np.diff(values) / np.timedelta64(1, "D")
-    else:
-        diffs = np.diff(values.astype(float))
-
-    diffs = np.asarray(diffs, dtype=float)
+    diffs = np.diff(_days_since_start(values))
     if not np.allclose(diffs, diffs[0], rtol=1e-5, atol=1e-8):
         raise ValueError(f"coordinate {coord.name!r} must be regularly spaced")
     if diffs[0] <= 0:
