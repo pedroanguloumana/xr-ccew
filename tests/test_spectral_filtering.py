@@ -65,6 +65,68 @@ class SpectralFilteringTests(unittest.TestCase):
         self.assertLess(float(np.abs(symmetric).max()), 1e-12)
 
 
+class IdentityPreservationTests(unittest.TestCase):
+    """Preprocessing must not let coordinate attributes reach the variable."""
+
+    def _field(self):
+        time = xr.date_range("2000-01-01", periods=256, freq="D")
+        lat = np.arange(-10.0, 10.1, 2.5)
+        lon = np.arange(0.0, 360.0, 10.0)
+        rng = np.random.default_rng(0)
+        da = xr.DataArray(
+            rng.standard_normal((time.size, lat.size, lon.size)),
+            dims=("time", "lat", "lon"),
+            coords={"time": time, "lat": lat, "lon": lon},
+            name="olr",
+            attrs={"units": "W m-2", "long_name": "outgoing longwave radiation"},
+        )
+        # A CF-compliant time axis, as read off a real NetCDF file. `bounds`
+        # and the conflicting `long_name` are what used to corrupt the result.
+        da.time.attrs.update(
+            {"standard_name": "time", "long_name": "Time", "bounds": "time_bnds", "axis": "T"}
+        )
+        return da
+
+    def _assert_identity_preserved(self, out, source):
+        self.assertEqual(out.name, source.name)
+        self.assertEqual(out.attrs, source.attrs)
+
+    def test_remove_mean_and_linear_trend_preserves_identity(self):
+        da = self._field()
+        self._assert_identity_preserved(tw.remove_mean_and_linear_trend(da), da)
+
+    def test_remove_harmonics_preserves_identity(self):
+        da = self._field()
+        out = tw.remove_harmonics_of_seasonal_cycle(da, num_harmonics=3)
+        self._assert_identity_preserved(out, da)
+        # The specific regression: the design matrix is built from `time.dt.*`
+        # and used to carry the time axis's attributes onto the anomaly.
+        for leaked in ("standard_name", "bounds", "axis"):
+            self.assertNotIn(leaked, out.attrs)
+        self.assertEqual(out.attrs["long_name"], "outgoing longwave radiation")
+
+    def test_apply_window_preserves_identity(self):
+        da = self._field()
+        out = tw.apply_window(da, dim="time", window="tukey", pct=0.1)
+        self._assert_identity_preserved(out, da)
+
+    def test_preprocessing_chain_preserves_identity(self):
+        da = self._field()
+        out = tw.remove_mean_and_linear_trend(da)
+        out = tw.remove_harmonics_of_seasonal_cycle(out, num_harmonics=3)
+        out = tw.filter_field(out, "Kelvin")
+        self.assertEqual(out.name, da.name)
+        for leaked in ("standard_name", "bounds", "axis"):
+            self.assertNotIn(leaked, out.attrs)
+        self.assertEqual(out.attrs["units"], "W m-2")
+
+    def test_preprocessing_leaves_source_untouched(self):
+        da = self._field()
+        before = dict(da.attrs)
+        tw.remove_harmonics_of_seasonal_cycle(da, num_harmonics=3)
+        self.assertEqual(da.attrs, before)
+
+
 if __name__ == "__main__":
     unittest.main()
 

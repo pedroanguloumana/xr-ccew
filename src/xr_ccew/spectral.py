@@ -56,6 +56,25 @@ def symmetric_antisymmetric_component(
     return symmetric + antisymmetric
 
 
+def _restore_identity(out: xr.DataArray, source: xr.DataArray) -> xr.DataArray:
+    """Restore `source`'s name and attributes on a derived array.
+
+    xarray merges operand attributes across a binary op and drops the keys
+    that conflict. Several operations here subtract or multiply by an
+    intermediate built from a coordinate of `source` -- the harmonic design
+    matrix, the linear trend, the taper -- and those intermediates inherit
+    that coordinate's attributes. Left alone, the result picks up the time
+    axis's `standard_name`/`bounds`/`axis` (writing a `bounds` attribute
+    that points at a variable no longer in the dataset, which is CF-invalid)
+    and loses any of the variable's own attributes that collide, such as
+    `long_name`. Each of these operations returns the same physical
+    quantity as `source`, so its identity carries over unchanged.
+    """
+    out.name = source.name
+    out.attrs = dict(source.attrs)
+    return out
+
+
 def remove_mean_and_linear_trend(da: xr.DataArray, *, dim: str = "time") -> xr.DataArray:
     """Remove the mean and least-squares linear trend along one dimension."""
     if dim not in da.dims:
@@ -67,7 +86,7 @@ def remove_mean_and_linear_trend(da: xr.DataArray, *, dim: str = "time") -> xr.D
     slope = (y0 * x0).sum(dim, skipna=True) / (x0 * x0).sum(dim)
     intercept = da.mean(dim, skipna=True)
     trend = intercept + slope * x0
-    return da - trend
+    return _restore_identity(da - trend, da)
 
 
 def remove_harmonics_of_seasonal_cycle(
@@ -100,6 +119,7 @@ def remove_harmonics_of_seasonal_cycle(
         cols.extend([np.sin(harmonic * theta), np.cos(harmonic * theta)])
 
     design = xr.concat(cols, dim="_harmonic").transpose(time_dim, "_harmonic").astype(float)
+    design.attrs = {}
 
     def _lstsq(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         beta, *_ = np.linalg.lstsq(x, y, rcond=None)
@@ -116,8 +136,8 @@ def remove_harmonics_of_seasonal_cycle(
         output_dtypes=[float],
         dask_gufunc_kwargs={"output_sizes": {"_harmonic": 2 * num_harmonics}},
     )
-    fitted = xr.dot(design, beta, dims="_harmonic")
-    return da - fitted
+    fitted = xr.dot(design, beta, dim="_harmonic")
+    return _restore_identity(da - fitted, da)
 
 
 def apply_window(
@@ -139,7 +159,7 @@ def apply_window(
         points_per_end=points_per_end,
     )
     w_da = xr.DataArray(weights, dims=(dim,), coords={dim: da[dim]}, name=f"{window}_window")
-    return da * w_da
+    return _restore_identity(da * w_da, da)
 
 
 def segment_data(
