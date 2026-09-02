@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import re
 from typing import Iterable
 
@@ -27,6 +27,10 @@ class WaveProfile:
     aliases: tuple[str, ...] = ()
     description: str = ""
     references: tuple[str, ...] = ()
+    # Set by :func:`xr_ccew.apply_frequency_ceiling`: the Nyquist-derived
+    # ceiling (cycles day-1) that frequency_max was truncated to. Recorded on
+    # the profile so provenance metadata can state which ceiling was applied.
+    frequency_ceiling: float | None = None
 
     def __post_init__(self) -> None:
         if self.k_min > self.k_max:
@@ -36,6 +40,11 @@ class WaveProfile:
         if self.equivalent_depth_min > self.equivalent_depth_max:
             raise ValueError(
                 f"{self.name}: equivalent_depth_min must be <= equivalent_depth_max"
+            )
+        if self.frequency_ceiling is not None and self.frequency_max > self.frequency_ceiling:
+            raise ValueError(
+                f"{self.name}: frequency_max ({self.frequency_max}) exceeds the recorded "
+                f"frequency_ceiling ({self.frequency_ceiling})"
             )
         if self.symmetry not in {"symmetric", "antisymmetric", "both"}:
             raise ValueError(
@@ -61,6 +70,10 @@ class WaveProfile:
     def with_updates(self, **updates: object) -> "WaveProfile":
         """Return a modified copy of the profile."""
         return replace(self, **updates)
+
+    def as_dict(self) -> dict[str, object]:
+        """Every parameter as a plain dict, for provenance metadata."""
+        return asdict(self)
 
 
 REFERENCE_WK99 = (

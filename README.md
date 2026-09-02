@@ -61,6 +61,24 @@ kelvin = tw.wave_profile("Kelvin")
 slow_kelvin = kelvin.with_updates(frequency_max=0.25)
 ```
 
+## Frequency Ceiling
+
+A sampled record only resolves frequencies below its Nyquist frequency, and
+the high-wavenumber tail of a dispersive profile such as `n=0 EIG` runs into
+it. Derive the truncation from the data's own time coordinate instead of
+hard-coding it:
+
+```python
+eig0 = tw.apply_frequency_ceiling("n=0 EIG", data.time)            # 0.8 x Nyquist
+eig0_sensitivity = tw.apply_frequency_ceiling("n=0 EIG", data.time, fraction=0.9)
+eig0.frequency_ceiling                                              # recorded for provenance
+tw.nyquist_frequency(data.time)
+```
+
+For daily data the default gives a 0.40 cycles-per-day ceiling (2.5 days). The
+ceiling is recorded on the returned profile, and `profile.as_dict()` gives
+every parameter for metadata.
+
 ## Data Conventions
 
 Core functions expect a latitude/longitude/time grid. The default dimension
