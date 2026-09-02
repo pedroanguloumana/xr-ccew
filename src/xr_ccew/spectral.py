@@ -430,7 +430,7 @@ def cross_spectrum(
     scaling: Literal["none", "density", "spectrum"] = "none",
     shift: bool = True,
 ) -> xr.DataArray:
-    """Complex space-time cross-spectrum conj(A) * B of two fields or two FFTs.
+    """Complex space-time cross-spectrum S_AB = conj(A) * B of two fields or two FFTs.
 
     The real part is the cospectrum (in-phase covariance per bin) and the
     imaginary part the quadrature spectrum. ``cross_spectrum(x, x).real``
@@ -439,10 +439,21 @@ def cross_spectrum(
     the covariance of the two series, which is what makes a band partition of
     a covariance close exactly (Parseval).
 
-    Sign of the imaginary part: for B equal to A delayed by a quarter period
-    (B lags A), the imaginary part is positive at the wave's (frequency,
-    wavenumber) bin under this library's eastward-positive frequency
-    convention, and negative when B leads; see ``tests/test_cross_spectrum.py``.
+    Phase convention (standard, the same as ``scipy.signal.csd``): the phase
+    ``arg(S_AB)`` is the phase of B minus the phase of A in physical time, so
+    on the positive-frequency half-plane a partner B that *leads* A has a
+    positive imaginary part and a partner that *lags* A by a quarter period
+    has a negative one; the negative-frequency half-plane holds the complex
+    conjugate. Because :func:`space_time_fft` negates the frequency axis
+    (positive frequency and wavenumber = eastward), each transform on that
+    axis is the conjugate of the physical-time transform, so the standard
+    cross-spectrum is obtained as ``A * conj(B)`` of the library transforms.
+    Verified against an integrated damped-advection solution with known lag
+    in ``tests/test_cross_spectrum.py``.
+
+    History: before September 2026 this function returned ``conj(A) * B`` of
+    the library transforms, i.e. the complex conjugate of the standard
+    cross-spectrum (opposite quadrature sign); the real part was unaffected.
     """
     fts = []
     for data in (data_a, data_b):
@@ -460,7 +471,7 @@ def cross_spectrum(
                 )
             )
     ft_a, ft_b = fts
-    cross = ft_a.conj() * ft_b
+    cross = ft_a * ft_b.conj()   # = conj(A) B in the physical time convention (see docstring)
     if scaling != "none":
         df = _coordinate_spacing_float(cross[frequency_dim], name=frequency_dim, absolute=True)
         dk = _coordinate_spacing_float(cross[wavenumber_dim], name=wavenumber_dim, absolute=True)
@@ -474,7 +485,10 @@ def cross_spectrum(
     name_a = data_a.name or "a"
     name_b = data_b.name or "b"
     cross.name = f"{name_a}_{name_b}_cross"
-    cross.attrs = {"description": f"conj(FFT[{name_a}]) * FFT[{name_b}]; real = cospectrum, imag = quadrature spectrum"}
+    cross.attrs = {
+        "description": f"cross-spectrum S_ab = conj(A) B of {name_a} and {name_b} in the physical time convention; real = cospectrum, imag = quadrature spectrum",
+        "phase_convention": "arg(S_ab) = phase(b) - phase(a): positive when b leads a on the positive-frequency half-plane (same as scipy.signal.csd)",
+    }
     cross[frequency_dim].attrs["units"] = "cycles day-1"
     cross[wavenumber_dim].attrs["units"] = "cycles per 360 degrees longitude"
     return cross

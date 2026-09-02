@@ -32,11 +32,99 @@ class CrossSpectrumTests(unittest.TestCase):
         cross = tw.cross_spectrum(a, b).isel(lat=0)
         peak = cross.sel(frequency=1 / 8, zonal_wavenumber=5, method="nearest")
         self.assertLess(abs(float(peak.real)), 1e-6 * abs(float(peak.imag)))
-        self.assertGreater(float(peak.imag), 0.0)   # documented sign: lagging partner gives a positive imaginary part
+        self.assertLess(float(peak.imag), 0.0)   # standard convention: a lagging partner gives a negative imaginary part
         # and the leading partner the opposite sign
         _, b_lead = _pair(phase_b_rad=-np.pi / 2)
         lead = tw.cross_spectrum(a, b_lead).isel(lat=0).sel(frequency=1 / 8, zonal_wavenumber=5, method="nearest")
-        self.assertLess(float(lead.imag), 0.0)
+        self.assertGreater(float(lead.imag), 0.0)
+
+    def test_negative_frequency_half_plane_is_the_complex_conjugate(self):
+        a, b = _pair(phase_b_rad=0.7)
+        cross = tw.cross_spectrum(a, b).isel(lat=0)
+        pos = cross.sel(frequency=1 / 8, zonal_wavenumber=5, method="nearest")
+        neg = cross.sel(frequency=-1 / 8, zonal_wavenumber=-5, method="nearest")
+        np.testing.assert_allclose(complex(neg.values), np.conj(complex(pos.values)), rtol=1e-10, atol=1e-12)
+
+
+EARTH_RADIUS_M = 6.371e6
+
+
+def _damped_advection(ubar_ms, tau_days, zonal_wavenumber, period_days, *, gradient=1e-6, n_days=500, dt_days=0.05, spinup_days=100):
+    """Integrate dq/dt + ubar dq/dx = -g v - q/tau with RK4 for v = cos(k x - omega t), sampled daily after spin-up.
+
+    Returns the daily (time, lon) fields v and q and the intrinsic frequency omega - ubar k in rad/day.
+    With zonal_wavenumber < 0 the prescribed wave moves westward (it appears at negative wavenumber
+    and positive frequency in this library); with > 0 eastward.
+    """
+    lon = np.arange(0.0, 360.0, 2.5)
+    x = np.deg2rad(lon) * EARTH_RADIUS_M
+    omega = 2.0 * np.pi / (period_days * 86400.0)
+    k_m = zonal_wavenumber / EARTH_RADIUS_M
+    kx = np.fft.fftfreq(lon.size, d=x[1] - x[0]) * 2.0 * np.pi
+    tau = tau_days * 86400.0
+    h = dt_days * 86400.0
+    n_steps = int(round((n_days + spinup_days) / dt_days))
+    per_day = int(round(1.0 / dt_days))
+
+    def rhs(q, t):
+        v = np.cos(k_m * x - omega * t)
+        dqdx = np.fft.ifft(1j * kx * np.fft.fft(q)).real
+        return -ubar_ms * dqdx - gradient * v - q / tau
+
+    q = np.zeros(lon.size)
+    v_out, q_out = [], []
+    for i in range(n_steps):
+        t = i * h
+        k1 = rhs(q, t)
+        k2 = rhs(q + 0.5 * h * k1, t + 0.5 * h)
+        k3 = rhs(q + 0.5 * h * k2, t + 0.5 * h)
+        k4 = rhs(q + h * k3, t + h)
+        q = q + h / 6.0 * (k1 + 2 * k2 + 2 * k3 + k4)      # q is now at time t + h
+        if (i + 1) % per_day == 0 and i + 1 >= spinup_days * per_day:
+            v_out.append(np.cos(k_m * x - omega * (t + h)))   # sample v at the same instant as q
+            q_out.append(q.copy())
+    time = xr.date_range("2000-01-01", periods=len(v_out), freq="D")
+    coords = {"time": time, "lon": lon}
+    v_da = xr.DataArray(np.array(v_out), dims=("time", "lon"), coords=coords, name="v")
+    q_da = xr.DataArray(np.array(q_out), dims=("time", "lon"), coords=coords, name="q")
+    return v_da, q_da, (omega - ubar_ms * k_m) * 86400.0
+
+
+class DampedAdvectionPhaseTests(unittest.TestCase):
+    """Regression test for the quadrature sign: q = -g v / (1/tau - i omega_intr) lags the anti-phase point by arctan(omega_intr tau)."""
+
+    def _lag_from_antiphase_deg(self, v, q, zonal_wavenumber, period_days):
+        cross = tw.cross_spectrum(v, q)
+        peak = cross.sel(frequency=1.0 / period_days, zonal_wavenumber=zonal_wavenumber, method="nearest")
+        self.assertLess(float(peak.real), 0.0)   # down-gradient covariance for g > 0
+        return np.degrees(np.arctan2(float(peak.imag), -float(peak.real))), cross
+
+    def test_westward_wave_lag_equals_arctan_omega_tau(self):
+        v, q, omega_intr = _damped_advection(ubar_ms=-5.0, tau_days=5.0, zonal_wavenumber=-4, period_days=5.0)
+        lag, _ = self._lag_from_antiphase_deg(v, q, -4, 5.0)
+        self.assertAlmostEqual(lag, np.degrees(np.arctan(omega_intr * 5.0)), delta=1.5)
+
+    def test_eastward_wave_lag_equals_arctan_omega_tau(self):
+        v, q, omega_intr = _damped_advection(ubar_ms=-5.0, tau_days=2.0, zonal_wavenumber=4, period_days=4.0)
+        lag, _ = self._lag_from_antiphase_deg(v, q, 4, 4.0)
+        self.assertAlmostEqual(lag, np.degrees(np.arctan(omega_intr * 2.0)), delta=1.5)
+
+    def test_reversed_intrinsic_propagation_reverses_the_lag(self):
+        # a strong easterly carries the westward wave eastward relative to the flow: omega_intr < 0, q leads the anti-phase point
+        v, q, omega_intr = _damped_advection(ubar_ms=-40.0, tau_days=5.0, zonal_wavenumber=-4, period_days=5.0)
+        self.assertLess(omega_intr, 0.0)
+        lag, _ = self._lag_from_antiphase_deg(v, q, -4, 5.0)
+        self.assertLess(lag, 0.0)
+        self.assertAlmostEqual(lag, np.degrees(np.arctan(omega_intr * 5.0)), delta=1.5)
+
+    def test_both_half_planes_give_the_same_lag(self):
+        v, q, omega_intr = _damped_advection(ubar_ms=-5.0, tau_days=5.0, zonal_wavenumber=-4, period_days=5.0)
+        lag_pos, cross = self._lag_from_antiphase_deg(v, q, -4, 5.0)
+        neg = cross.sel(frequency=-1.0 / 5.0, zonal_wavenumber=4, method="nearest")
+        # the conjugate bin: applying the sign of the frequency recovers the same lag
+        lag_neg = np.degrees(np.arctan2(np.sign(float(neg.frequency)) * float(neg.imag), -float(neg.real)))
+        self.assertAlmostEqual(lag_pos, lag_neg, places=6)
+        self.assertAlmostEqual(lag_pos, np.degrees(np.arctan(omega_intr * 5.0)), delta=1.5)
 
     def test_anti_phase_pair_is_real_and_negative(self):
         a, b = _pair(phase_b_rad=np.pi)
