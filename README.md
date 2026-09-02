@@ -79,6 +79,24 @@ For daily data the default gives a 0.40 cycles-per-day ceiling (2.5 days). The
 ceiling is recorded on the returned profile, and `profile.as_dict()` gives
 every parameter for metadata.
 
+## Cross-Spectra and Segment Averaging
+
+`cross_spectrum(a, b)` returns the complex space-time cross-spectrum
+`conj(FFT[a]) * FFT[b]` (real part: cospectrum; imaginary part: quadrature
+spectrum), and `segment_averaged_spectrum(a, b=None, ...)` runs one
+preprocessing chain (component, detrending, seasonal harmonics, overlapping
+segments, taper, FFT) for either a power spectrum or a cross-spectrum, with a
+normalisation whose sum over all bins is the covariance of the tapered segment
+anomalies. That is what lets a band partition of a covariance close exactly
+(Parseval):
+
+```python
+cross = tw.segment_averaged_spectrum(v, q, segment_days=128, overlap_days=64)
+cospectrum = cross.real
+mask = tw.make_filter_mask(cospectrum, "MRG", include_conjugates=True)
+band_covariance = float(cospectrum.where(mask, 0.0).sum())
+```
+
 ## Data Conventions
 
 Core functions expect a latitude/longitude/time grid. The default dimension

@@ -419,6 +419,194 @@ def power_spectrum(
     return power
 
 
+def cross_spectrum(
+    data_a: xr.DataArray,
+    data_b: xr.DataArray,
+    *,
+    time_dim: str = "time",
+    lon_dim: str = "lon",
+    frequency_dim: str = "frequency",
+    wavenumber_dim: str = "zonal_wavenumber",
+    scaling: Literal["none", "density", "spectrum"] = "none",
+    shift: bool = True,
+) -> xr.DataArray:
+    """Complex space-time cross-spectrum conj(A) * B of two fields or two FFTs.
+
+    The real part is the cospectrum (in-phase covariance per bin) and the
+    imaginary part the quadrature spectrum. ``cross_spectrum(x, x).real``
+    equals ``power_spectrum(x)`` bin for bin. Summed over every bin (with the
+    normalisation used by :func:`segment_averaged_spectrum`) the real part is
+    the covariance of the two series, which is what makes a band partition of
+    a covariance close exactly (Parseval).
+
+    Sign of the imaginary part: for B equal to A delayed by a quarter period
+    (B lags A), the imaginary part is positive at the wave's (frequency,
+    wavenumber) bin under this library's eastward-positive frequency
+    convention, and negative when B leads; see ``tests/test_cross_spectrum.py``.
+    """
+    fts = []
+    for data in (data_a, data_b):
+        if frequency_dim in data.dims and wavenumber_dim in data.dims:
+            fts.append(data)
+        else:
+            fts.append(
+                space_time_fft(
+                    data,
+                    time_dim=time_dim,
+                    lon_dim=lon_dim,
+                    frequency_dim=frequency_dim,
+                    wavenumber_dim=wavenumber_dim,
+                    shift=shift,
+                )
+            )
+    ft_a, ft_b = fts
+    cross = ft_a.conj() * ft_b
+    if scaling != "none":
+        df = _coordinate_spacing_float(cross[frequency_dim], name=frequency_dim, absolute=True)
+        dk = _coordinate_spacing_float(cross[wavenumber_dim], name=wavenumber_dim, absolute=True)
+        cell = df * dk
+        if scaling == "density":
+            cross = cross * cell
+        elif scaling == "spectrum":
+            cross = cross * (cell**2)
+        else:
+            raise ValueError("scaling must be 'none', 'density', or 'spectrum'")
+    name_a = data_a.name or "a"
+    name_b = data_b.name or "b"
+    cross.name = f"{name_a}_{name_b}_cross"
+    cross.attrs = {"description": f"conj(FFT[{name_a}]) * FFT[{name_b}]; real = cospectrum, imag = quadrature spectrum"}
+    cross[frequency_dim].attrs["units"] = "cycles day-1"
+    cross[wavenumber_dim].attrs["units"] = "cycles per 360 degrees longitude"
+    return cross
+
+
+def segment_averaged_spectrum(
+    data_a: xr.DataArray,
+    data_b: xr.DataArray | None = None,
+    *,
+    segment_days: int = 96,
+    overlap_days: int = 30,
+    component: Literal["symmetric", "antisymmetric"] | None = None,
+    num_harmonics: int = 3,
+    detrend_segments: bool = True,
+    window: Literal["tukey", "hann", "hanning", "hamming", "blackman"] = "tukey",
+    window_pct: float = 0.10,
+    average_over_lat: bool = True,
+    time_dim: str = "time",
+    lat_dim: str = "lat",
+    lon_dim: str = "lon",
+) -> xr.DataArray:
+    """Segment-averaged space-time power (one field) or cross-spectrum (two fields).
+
+    One preprocessing chain serves both, so a band partition of a cospectrum
+    closes against the power and covariance computed the same way:
+
+    1. optional equatorial ``component`` (symmetric or antisymmetric) of each field;
+    2. full-record mean, linear trend and the first ``num_harmonics`` annual
+       harmonics removed (``num_harmonics=0`` skips the harmonics);
+    3. overlapping segments of ``segment_days`` with ``overlap_days``; each
+       segment is trimmed to exactly ``segment_days / dt`` samples so that
+       every sampling interval shares one frequency grid with
+       ``df = 1 / segment_days`` (``segment_data`` itself returns one sample
+       more, both endpoints inclusive);
+    4. per segment, mean and trend removed again if ``detrend_segments``, a
+       taper of the given ``window``, the space-time FFT, and
+       ``conj(A) * B`` (or ``|A|^2``);
+    5. average over segments and, if present and ``average_over_lat``, over
+       ``lat_dim``.
+
+    Normalisation: each bin is divided by ``(N_t N_x)^2 mean(w^2)`` with w the
+    taper, so the sum over all (frequency, wavenumber) bins equals the
+    (latitude-mean) covariance of the tapered segment anomalies corrected for
+    the taper's variance loss. For one field the result is real; for two it is
+    complex, with the real part the cospectrum.
+
+    The parameters, the number of segments and the normalisation are recorded
+    in ``attrs``.
+    """
+    def _prepare(data: xr.DataArray) -> xr.DataArray:
+        field = data
+        if component is not None:
+            field = symmetric_antisymmetric_component(field, component, lat_dim=lat_dim)
+        field = remove_mean_and_linear_trend(field, dim=time_dim)
+        if num_harmonics:
+            field = remove_harmonics_of_seasonal_cycle(field, num_harmonics=num_harmonics, time_dim=time_dim)
+        return field.load()
+
+    field_a = _prepare(data_a)
+    field_b = _prepare(data_b) if data_b is not None else None
+
+    dt_days = _coordinate_spacing_days(field_a[time_dim])
+    n_time = int(round(segment_days / dt_days))
+    n_lon = field_a.sizes[lon_dim]
+
+    def _segments(field: xr.DataArray) -> list[xr.DataArray]:
+        return [
+            seg.isel({time_dim: slice(0, n_time)})
+            for seg in segment_data(field, segment_days=segment_days, overlap_days=overlap_days, time_dim=time_dim)
+            if seg.sizes[time_dim] >= n_time
+        ]
+
+    segments_a = _segments(field_a)
+    if not segments_a:
+        raise ValueError("record shorter than one segment")
+    segments_b = _segments(field_b) if field_b is not None else None
+    if segments_b is not None and len(segments_b) != len(segments_a):
+        raise ValueError("the two fields produced different segment counts; they must share a time coordinate")
+
+    ones = xr.DataArray(np.ones(n_time), dims=(time_dim,), coords={time_dim: segments_a[0][time_dim]})
+    taper = apply_window(ones, dim=time_dim, window=window, pct=window_pct)
+    mean_w2 = float((taper**2).mean())
+    norm = 1.0 / ((n_time * n_lon) ** 2 * mean_w2)
+
+    def _tapered_fft(seg: xr.DataArray) -> xr.DataArray:
+        if detrend_segments:
+            seg = remove_mean_and_linear_trend(seg, dim=time_dim)
+        seg = apply_window(seg, dim=time_dim, window=window, pct=window_pct)
+        return space_time_fft(seg, time_dim=time_dim, lon_dim=lon_dim)
+
+    total = None
+    for i, seg_a in enumerate(segments_a):
+        ft_a = _tapered_fft(seg_a)
+        if segments_b is None:
+            spec = power_spectrum(ft_a) * norm
+        else:
+            ft_b = _tapered_fft(segments_b[i])
+            spec = cross_spectrum(ft_a, ft_b) * norm
+        total = spec if total is None else total + spec
+    mean_spec = total / len(segments_a)
+    if average_over_lat and lat_dim in mean_spec.dims:
+        mean_spec = mean_spec.mean(lat_dim)
+
+    name_a = data_a.name or "a"
+    if data_b is None:
+        mean_spec.name = f"{name_a}_power"
+        long_name = "segment-averaged space-time power"
+        units = f"({data_a.attrs.get('units', '1')})^2 per bin"
+    else:
+        name_b = data_b.name or "b"
+        mean_spec.name = f"{name_a}_{name_b}_cross"
+        long_name = "segment-averaged space-time cross-spectrum (real: cospectrum, imag: quadrature)"
+        units = f"({data_a.attrs.get('units', '1')})({data_b.attrs.get('units', '1')}) per bin"
+    mean_spec.attrs = {
+        "long_name": long_name,
+        "units": units,
+        "component": component or "full",
+        "segment_days": segment_days,
+        "overlap_days": overlap_days,
+        "n_segments": len(segments_a),
+        "samples_per_segment": n_time,
+        "sampling_interval_days": dt_days,
+        "nyquist_frequency_cpd": 0.5 / dt_days,
+        "num_seasonal_harmonics": num_harmonics,
+        "detrend_segments": str(detrend_segments),
+        "window": f"{window} pct={window_pct}",
+        "normalisation": "conj(A)B/(N_t N_x)^2/mean(w^2); sums to the (lat-mean) covariance of the tapered segment anomalies",
+        "latitude_range": f"{float(data_a[lat_dim].min()):g} to {float(data_a[lat_dim].max()):g}" if lat_dim in data_a.dims else "n/a",
+    }
+    return mean_spec
+
+
 def background_spectrum(
     power: xr.DataArray,
     *,
