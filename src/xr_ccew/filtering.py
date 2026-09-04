@@ -214,7 +214,14 @@ def _profile_mask(
         frequency_dim=frequency_dim,
         wavenumber_dim=wavenumber_dim,
     )
-    return rectangular & curve_mask
+    polygon_mask = _profile_polygon_mask(
+        frequency,
+        wavenumber,
+        profile,
+        frequency_dim=frequency_dim,
+        wavenumber_dim=wavenumber_dim,
+    )
+    return rectangular & curve_mask & polygon_mask
 
 
 def _profile_curve_mask(
@@ -271,6 +278,70 @@ def _profile_curve_mask(
     _, f_max_grid = xr.broadcast(frequency, f_max)
     _, finite_grid = xr.broadcast(frequency, finite_da)
     return finite_grid & (freq_grid >= f_min_grid) & (freq_grid <= f_max_grid)
+
+
+# Absolute tolerance (cycles day-1) when testing frequencies against sloped
+# polygon edges, so that a grid frequency lying exactly on an edge is kept
+# despite floating-point rounding of the interpolated edge.
+_POLYGON_FREQUENCY_TOLERANCE = 1e-9
+
+
+def _profile_polygon_mask(
+    frequency: xr.DataArray,
+    wavenumber: xr.DataArray,
+    profile: WaveProfile,
+    *,
+    frequency_dim: str,
+    wavenumber_dim: str,
+) -> xr.DataArray:
+    template = xr.broadcast(frequency, wavenumber)[0]
+    if profile.wavenumber_frequency_polygon is None:
+        return xr.ones_like(template, dtype=bool)
+
+    k_values = np.asarray(wavenumber.values, dtype=float)
+    lower, upper = _polygon_frequency_bounds(
+        np.asarray(profile.wavenumber_frequency_polygon, dtype=float), k_values
+    )
+    covered = np.isfinite(lower) & np.isfinite(upper)
+
+    def as_column(values: np.ndarray) -> xr.DataArray:
+        return xr.DataArray(values, dims=(wavenumber_dim,), coords={wavenumber_dim: wavenumber})
+
+    freq_grid, lower_grid = xr.broadcast(frequency, as_column(lower))
+    _, upper_grid = xr.broadcast(frequency, as_column(upper))
+    _, covered_grid = xr.broadcast(frequency, as_column(covered))
+    tol = _POLYGON_FREQUENCY_TOLERANCE
+    return covered_grid & (freq_grid >= lower_grid - tol) & (freq_grid <= upper_grid + tol)
+
+
+def _polygon_frequency_bounds(
+    vertices: np.ndarray, k_values: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Lowest and highest frequency of a convex polygon at each wavenumber.
+
+    Returns NaN for wavenumber columns that do not intersect the polygon.
+    Edge endpoints are reproduced exactly so vertices on the wavenumber grid
+    are included without rounding error.
+    """
+    lower = np.full(k_values.shape, np.inf)
+    upper = np.full(k_values.shape, -np.inf)
+    n = len(vertices)
+    for i in range(n):
+        k1, f1 = vertices[i]
+        k2, f2 = vertices[(i + 1) % n]
+        hit = (k_values >= min(k1, k2)) & (k_values <= max(k1, k2))
+        if k1 == k2:
+            edge_lower = np.full(k_values.shape, min(f1, f2))
+            edge_upper = np.full(k_values.shape, max(f1, f2))
+        else:
+            weight = (k_values - k1) / (k2 - k1)
+            edge_lower = edge_upper = f1 * (1.0 - weight) + f2 * weight
+        lower = np.where(hit, np.minimum(lower, edge_lower), lower)
+        upper = np.where(hit, np.maximum(upper, edge_upper), upper)
+    missed = ~(np.isfinite(lower) & np.isfinite(upper))
+    lower[missed] = np.nan
+    upper[missed] = np.nan
+    return lower, upper
 
 
 def _coerce_profiles(

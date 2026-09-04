@@ -39,6 +39,61 @@ class SpectralFilteringTests(unittest.TestCase):
 
         self.assertLess(error, 1e-10)
 
+    def test_td_type_filter_keeps_westward_wave_inside_the_box(self):
+        westward = tw.synthetic_wave(
+            period_days=4,
+            zonal_wavenumber=8,
+            amplitude=1.0,
+            propagation="westward",
+            meridional_mode="symmetric",
+        )
+        eastward = tw.synthetic_wave(
+            period_days=4,
+            zonal_wavenumber=8,
+            amplitude=1.0,
+            propagation="eastward",
+            meridional_mode="symmetric",
+        )
+        mixed = westward + eastward
+
+        filtered = tw.filter_field(mixed, "td")
+        error = float(np.abs(filtered - westward).max())
+        self.assertLess(error, 1e-10)
+
+    def test_td_type_mask_is_the_kiladis_2006_parallelogram(self):
+        frequency = np.fft.fftshift(np.fft.fftfreq(96, d=1.0))
+        wavenumber = np.arange(-72, 72, dtype=float)
+        spectrum = xr.DataArray(
+            np.zeros((frequency.size, wavenumber.size)),
+            dims=("frequency", "zonal_wavenumber"),
+            coords={"frequency": frequency, "zonal_wavenumber": wavenumber},
+        )
+        mask = tw.make_filter_mask(spectrum, "TD-type", include_conjugates=False)
+
+        # Both sloped edges drop 1/84 cpd per unit wavenumber from k=-20.
+        f, k = xr.broadcast(spectrum.frequency, spectrum.zonal_wavenumber)
+        drop = (k + 20.0) / 84.0
+        expected = (
+            (k >= -20) & (k <= -6) & (f >= 0.3 - drop - 1e-9) & (f <= 0.5 - drop + 1e-9)
+        )
+        self.assertTrue(bool(expected.any()))
+        self.assertTrue(bool((mask.transpose(*expected.dims) == expected).all()))
+
+        column = lambda kk: mask.sel(zonal_wavenumber=kk)  # noqa: E731
+        kept = lambda kk: column(kk).frequency.where(column(kk), drop=True).values  # noqa: E731
+        np.testing.assert_allclose(kept(-20).min(), 29 / 96)
+        np.testing.assert_allclose(kept(-20).max(), 47 / 96)
+        np.testing.assert_allclose(kept(-6).min(), 13 / 96)
+        np.testing.assert_allclose(kept(-6).max(), 32 / 96)  # 1/3 lies on the grid: kept
+        self.assertEqual(kept(-5).size, 0)
+        self.assertEqual(kept(-21).size, 0)
+
+        # At k=-13 the upper edge sits exactly on the 40/96 grid line.
+        self.assertTrue(bool(column(-13).sel(frequency=40 / 96, method="nearest")))
+        self.assertFalse(bool(column(-13).sel(frequency=41 / 96, method="nearest")))
+        # Inside the bounding rectangle but above the sloped edge.
+        self.assertFalse(bool(column(-10).sel(frequency=0.45, method="nearest")))
+
     def test_symmetry_decomposition_handles_off_equatorial_grid(self):
         lat = np.array([-18.0, -13.0, -8.0, -3.0, 2.0, 7.0, 12.0, 17.0])
         time = np.arange(4)

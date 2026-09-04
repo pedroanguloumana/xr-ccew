@@ -53,6 +53,14 @@ The initial built-in profiles are ported from the reference project:
 - n=0 eastward inertial gravity (`n=0 EIG`)
 - n=1 westward inertial gravity (`n=1 WIG`)
 - n=2 westward inertial gravity (`n=2 WIG`)
+- Tropical depression-type / easterly wave band (`TD-type`): the Kiladis et
+  al. (2006) parallelogram over westward wavenumbers 6-20, spanning
+  2-3.3-day periods at k=-20 and 3-7.5-day periods at k=-6, with no
+  dispersion curves
+
+Besides rectangular and dispersion-curve bounds, a profile can carry a convex
+`wavenumber_frequency_polygon` of (wavenumber, frequency) vertices; the filter
+mask is the intersection of the polygon with the profile's k/frequency bounds.
 
 Profiles can be inspected and copied with modifications:
 
