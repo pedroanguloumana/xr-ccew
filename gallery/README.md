@@ -36,3 +36,12 @@ XR_CCEW_GALLERY_MAX_SEGMENTS=1 \
 XR_CCEW_GALLERY_OUTPUT_DIR=/tmp/xr_ccew_gallery_smoke \
 jupyter nbconvert --to notebook --execute gallery/01_noaa_olr_spectra.ipynb
 ```
+
+`02_wave_filter_regions.ipynb` has no external-data dependency. It renders the
+primary frequency-wavenumber region for every built-in filter and overlays the
+resting MRG region with its constant-`U=10 m s-1` Doppler-shifted counterpart:
+
+```bash
+conda activate xr_ccew
+jupyter lab gallery/02_wave_filter_regions.ipynb
+```

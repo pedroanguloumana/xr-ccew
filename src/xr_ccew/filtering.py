@@ -8,7 +8,7 @@ from collections.abc import Iterable
 import numpy as np
 import xarray as xr
 
-from .matsuno import profile_curve_frequency
+from .matsuno import _validate_background_wind, profile_curve_frequency, zonal_wind_frequency_shift
 from .profiles import WaveProfile, wave_profiles
 from .spectral import space_time_fft, space_time_ifft, symmetric_antisymmetric_component
 
@@ -20,8 +20,18 @@ def make_filter_mask(
     frequency_dim: str = "frequency",
     wavenumber_dim: str = "zonal_wavenumber",
     include_conjugates: bool = True,
+    background_u: float = 0.0,
+    background_v: float = 0.0,
 ) -> xr.DataArray:
-    """Create a boolean filter mask from one or more wave profiles."""
+    """Create a boolean filter mask from one or more wave profiles.
+
+    The default ``background_u=background_v=0`` uses resting-state Matsuno
+    curves. A nonzero ``background_u`` (m s-1; eastward positive) applies a
+    signed zonal Doppler shift to the profile curves and frequency bounds.
+    ``background_v`` must remain zero because a constant meridional flow is
+    not representable by this frequency-zonal-wavenumber Matsuno filter.
+    """
+    background_u, background_v = _validate_background_wind(background_u, background_v)
     resolved = _coerce_profiles(profiles)
     if not resolved:
         raise ValueError("at least one wave profile is required")
@@ -45,6 +55,8 @@ def make_filter_mask(
             profile,
             frequency_dim=frequency_dim,
             wavenumber_dim=wavenumber_dim,
+            background_u=background_u,
+            background_v=background_v,
         )
 
     if include_conjugates:
@@ -56,6 +68,11 @@ def make_filter_mask(
 
     combined.name = "filter_mask"
     combined.attrs["wave_profiles"] = ", ".join(profile.name for profile in resolved)
+    combined.attrs["background_u_m_s"] = background_u
+    combined.attrs["background_v_m_s"] = background_v
+    combined.attrs["matsuno_basic_state"] = (
+        "resting" if background_u == 0.0 else "constant-zonal-wind Doppler approximation"
+    )
     return combined
 
 
@@ -80,16 +97,20 @@ def filter_field(
     wavenumber_dim: str = "zonal_wavenumber",
     apply_profile_symmetry: bool = True,
     shift: bool = True,
+    background_u: float = 0.0,
+    background_v: float = 0.0,
 ) -> xr.DataArray | xr.Dataset:
     """Filter a field by one or more wave profiles.
 
     When profile symmetry is applied, each profile filters the corresponding
     symmetric, antisymmetric, or full field component before the pieces are
-    summed back together.
+    summed back together. ``background_u`` and ``background_v`` have the
+    same interpretation as :func:`make_filter_mask`.
     """
+    background_u, background_v = _validate_background_wind(background_u, background_v)
     resolved = _coerce_profiles(profiles)
     if isinstance(data, xr.Dataset):
-        return data.map(
+        out = data.map(
             lambda da: filter_field(
                 da,
                 resolved,
@@ -100,10 +121,19 @@ def filter_field(
                 wavenumber_dim=wavenumber_dim,
                 apply_profile_symmetry=apply_profile_symmetry,
                 shift=shift,
+                background_u=background_u,
+                background_v=background_v,
             )
             if time_dim in da.dims and lon_dim in da.dims
             else da
         )
+        out.attrs.update(data.attrs)
+        out.attrs["background_u_m_s"] = background_u
+        out.attrs["background_v_m_s"] = background_v
+        out.attrs["matsuno_basic_state"] = (
+            "resting" if background_u == 0.0 else "constant-zonal-wind Doppler approximation"
+        )
+        return out
 
     if not resolved:
         raise ValueError("at least one wave profile is required")
@@ -138,6 +168,8 @@ def filter_field(
             frequency_dim=frequency_dim,
             wavenumber_dim=wavenumber_dim,
             include_conjugates=True,
+            background_u=background_u,
+            background_v=background_v,
         )
         filtered_spectrum = apply_filter_mask(spectrum, mask)
         filtered_parts.append(
@@ -159,6 +191,11 @@ def filter_field(
     out.name = data.name
     out.attrs.update(data.attrs)
     out.attrs["filtered_wave_profiles"] = ", ".join(profile.name for profile in resolved)
+    out.attrs["background_u_m_s"] = background_u
+    out.attrs["background_v_m_s"] = background_v
+    out.attrs["matsuno_basic_state"] = (
+        "resting" if background_u == 0.0 else "constant-zonal-wind Doppler approximation"
+    )
     return out
 
 
@@ -198,11 +235,20 @@ def _profile_mask(
     *,
     frequency_dim: str,
     wavenumber_dim: str,
+    background_u: float,
+    background_v: float,
 ) -> xr.DataArray:
     freq_grid, k_grid = xr.broadcast(frequency, wavenumber)
+    wind_shift_da = xr.DataArray(
+        zonal_wind_frequency_shift(wavenumber.values, background_u),
+        dims=(wavenumber_dim,),
+        coords={wavenumber_dim: wavenumber},
+    )
+    _, wind_shift_grid = xr.broadcast(frequency, wind_shift_da)
+    intrinsic_freq_grid = freq_grid - wind_shift_grid
     rectangular = (
-        (freq_grid >= profile.frequency_min)
-        & (freq_grid <= profile.frequency_max)
+        (intrinsic_freq_grid >= profile.frequency_min)
+        & (intrinsic_freq_grid <= profile.frequency_max)
         & (k_grid >= profile.k_min)
         & (k_grid <= profile.k_max)
     )
@@ -213,6 +259,8 @@ def _profile_mask(
         profile,
         frequency_dim=frequency_dim,
         wavenumber_dim=wavenumber_dim,
+        background_u=background_u,
+        background_v=background_v,
     )
     polygon_mask = _profile_polygon_mask(
         frequency,
@@ -220,6 +268,7 @@ def _profile_mask(
         profile,
         frequency_dim=frequency_dim,
         wavenumber_dim=wavenumber_dim,
+        background_u=background_u,
     )
     return rectangular & curve_mask & polygon_mask
 
@@ -231,6 +280,8 @@ def _profile_curve_mask(
     *,
     frequency_dim: str,
     wavenumber_dim: str,
+    background_u: float,
+    background_v: float,
 ) -> xr.DataArray:
     if profile.curve_name is None:
         return xr.ones_like(xr.broadcast(frequency, wavenumber)[0], dtype=bool)
@@ -246,12 +297,16 @@ def _profile_curve_mask(
         k_values,
         profile.equivalent_depth_min,
         meridional_mode_number=profile.meridional_mode_number,
+        background_u=background_u,
+        background_v=background_v,
     )
     upper = profile_curve_frequency(
         profile.curve_name,
         k_values,
         profile.equivalent_depth_max,
         meridional_mode_number=profile.meridional_mode_number,
+        background_u=background_u,
+        background_v=background_v,
     )
     finite = np.isfinite(lower) & np.isfinite(upper)
 
@@ -293,6 +348,7 @@ def _profile_polygon_mask(
     *,
     frequency_dim: str,
     wavenumber_dim: str,
+    background_u: float,
 ) -> xr.DataArray:
     template = xr.broadcast(frequency, wavenumber)[0]
     if profile.wavenumber_frequency_polygon is None:
@@ -302,6 +358,9 @@ def _profile_polygon_mask(
     lower, upper = _polygon_frequency_bounds(
         np.asarray(profile.wavenumber_frequency_polygon, dtype=float), k_values
     )
+    wind_shift = zonal_wind_frequency_shift(k_values, background_u)
+    lower = lower + wind_shift
+    upper = upper + wind_shift
     covered = np.isfinite(lower) & np.isfinite(upper)
 
     def as_column(values: np.ndarray) -> xr.DataArray:
@@ -350,4 +409,3 @@ def _coerce_profiles(
     if isinstance(profiles, (str, WaveProfile)):
         return wave_profiles(profiles)
     return wave_profiles(*profiles)
-

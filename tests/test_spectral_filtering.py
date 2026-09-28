@@ -4,9 +4,165 @@ import numpy as np
 import xarray as xr
 
 import xr_ccew as tw
+from xr_ccew.matsuno import SECONDS_PER_DAY, beta_parameters
 
 
 class SpectralFilteringTests(unittest.TestCase):
+    def _narrow_eastward_profile(self, *, frequency, zonal_wavenumber):
+        return tw.WaveProfile(
+            name="narrow eastward band",
+            k_min=zonal_wavenumber,
+            k_max=zonal_wavenumber,
+            frequency_min=frequency - 1e-6,
+            frequency_max=frequency + 1e-6,
+            equivalent_depth_min=-np.inf,
+            equivalent_depth_max=np.inf,
+            symmetry="both",
+            direction="eastward",
+        )
+
+    def _shifted_eastward_filter_case(self):
+        n_time = 256
+        zonal_wavenumber = 5
+        resting_frequency = 10.0 / n_time
+        observed_frequency = 20.0 / n_time
+        _, perimeter = beta_parameters()
+        background_u = (
+            (observed_frequency - resting_frequency)
+            * perimeter
+            / (zonal_wavenumber * SECONDS_PER_DAY)
+        )
+        profile = self._narrow_eastward_profile(
+            frequency=resting_frequency,
+            zonal_wavenumber=zonal_wavenumber,
+        )
+        eastward = tw.synthetic_wave(
+            period_days=1.0 / observed_frequency,
+            zonal_wavenumber=zonal_wavenumber,
+            meridional_mode="flat",
+            n_time=n_time,
+            n_lon=24,
+        )
+        return profile, eastward, background_u
+
+    def test_background_u_shifts_profile_frequency_window_in_filter_mask(self):
+        zonal_wavenumber = 1.0
+        background_u = 10.0
+        _, perimeter = beta_parameters()
+        doppler_shift = background_u * zonal_wavenumber * SECONDS_PER_DAY / perimeter
+        resting_frequency = 0.1
+        profile = self._narrow_eastward_profile(
+            frequency=resting_frequency,
+            zonal_wavenumber=zonal_wavenumber,
+        )
+        spectrum = xr.DataArray(
+            np.zeros((2, 3)),
+            dims=("frequency", "zonal_wavenumber"),
+            coords={
+                "frequency": [resting_frequency, resting_frequency + doppler_shift],
+                "zonal_wavenumber": [0.0, zonal_wavenumber, 2.0],
+            },
+        )
+
+        resting_mask = tw.make_filter_mask(spectrum, profile, include_conjugates=False)
+        zero_wind_mask = tw.make_filter_mask(
+            spectrum,
+            profile,
+            include_conjugates=False,
+            background_u=0.0,
+            background_v=0.0,
+        )
+        shifted_mask = tw.make_filter_mask(
+            spectrum,
+            profile,
+            include_conjugates=False,
+            background_u=background_u,
+        )
+
+        xr.testing.assert_identical(zero_wind_mask, resting_mask)
+        self.assertTrue(bool(resting_mask.isel(frequency=0, zonal_wavenumber=1)))
+        self.assertFalse(bool(resting_mask.isel(frequency=1, zonal_wavenumber=1)))
+        self.assertFalse(bool(shifted_mask.isel(frequency=0, zonal_wavenumber=1)))
+        self.assertTrue(bool(shifted_mask.isel(frequency=1, zonal_wavenumber=1)))
+
+        with self.assertRaises(NotImplementedError):
+            tw.make_filter_mask(spectrum, profile, background_v=1.0)
+
+    def test_background_u_shifts_td_type_polygon(self):
+        background_u = 1.0
+        zonal_wavenumber = -20.0
+        _, perimeter = beta_parameters()
+        doppler_shift = background_u * zonal_wavenumber * SECONDS_PER_DAY / perimeter
+        spectrum = xr.DataArray(
+            np.zeros((2, 1)),
+            dims=("frequency", "zonal_wavenumber"),
+            coords={
+                "frequency": [0.3 + doppler_shift, 0.3],
+                "zonal_wavenumber": [zonal_wavenumber],
+            },
+        )
+
+        resting_mask = tw.make_filter_mask(spectrum, "TD-type", include_conjugates=False)
+        shifted_mask = tw.make_filter_mask(
+            spectrum,
+            "TD-type",
+            include_conjugates=False,
+            background_u=background_u,
+        )
+
+        self.assertFalse(bool(resting_mask.isel(frequency=0, zonal_wavenumber=0)))
+        self.assertTrue(bool(shifted_mask.isel(frequency=0, zonal_wavenumber=0)))
+
+    def test_filter_field_uses_background_u_and_rejects_background_v(self):
+        profile, eastward, background_u = self._shifted_eastward_filter_case()
+
+        resting = tw.filter_field(eastward, profile, apply_profile_symmetry=False)
+        shifted = tw.filter_field(
+            eastward,
+            profile,
+            apply_profile_symmetry=False,
+            background_u=background_u,
+            background_v=0.0,
+        )
+
+        self.assertLess(float(np.abs(resting).max()), 1e-10)
+        self.assertLess(float(np.abs(shifted - eastward).max()), 1e-10)
+        with self.assertRaises(NotImplementedError):
+            tw.filter_field(
+                eastward,
+                profile,
+                apply_profile_symmetry=False,
+                background_v=1.0,
+            )
+
+    def test_filter_field_forwards_background_u_across_dataset_variables(self):
+        profile, eastward, background_u = self._shifted_eastward_filter_case()
+        data = xr.Dataset(
+            {
+                "wave": eastward,
+                "scaled_wave": 0.5 * eastward,
+                "metadata": xr.DataArray([1, 2], dims=("record",)),
+            },
+            attrs={"source": "synthetic"},
+        )
+
+        filtered = tw.filter_field(
+            data,
+            profile,
+            apply_profile_symmetry=False,
+            background_u=background_u,
+        )
+
+        self.assertLess(float(np.abs(filtered["wave"] - eastward).max()), 1e-10)
+        self.assertLess(float(np.abs(filtered["scaled_wave"] - 0.5 * eastward).max()), 1e-10)
+        xr.testing.assert_identical(filtered["metadata"], data["metadata"])
+        self.assertEqual(filtered.attrs["background_u_m_s"], background_u)
+        self.assertEqual(filtered.attrs["background_v_m_s"], 0.0)
+        self.assertEqual(
+            filtered.attrs["matsuno_basic_state"],
+            "constant-zonal-wind Doppler approximation",
+        )
+
     def test_space_time_power_peak_uses_eastward_positive_convention(self):
         data = tw.synthetic_wave(period_days=8, zonal_wavenumber=5, meridional_mode="flat")
 
@@ -272,4 +428,3 @@ class NonStandardCalendarTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

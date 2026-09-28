@@ -41,6 +41,30 @@ filtered = tw.filter_field(data, waves)
 power = tw.power_spectrum(data)
 ```
 
+## Constant Background Wind
+
+By default, filters use Matsuno dispersion curves for a resting basic state.
+You can apply a constant eastward-positive zonal background wind in metres per
+second:
+
+```python
+filtered = tw.filter_field(data, "Kelvin", background_u=10.0)
+```
+
+This uses the constant-zonal-advection Doppler approximation. For signed global
+zonal wavenumber `s`, the observed-frequency shift is
+`background_u * s * 86400 / perimeter` cycles day-1. Profile frequency bounds,
+including sloped polygon bounds, and equivalent-depth curves are treated as
+intrinsic/rest-state bounds, then shifted into the observed frame together. The
+default `background_u=0.0` therefore reproduces the resting Matsuno behavior.
+
+`background_v=0.0` is accepted for an explicit resting meridional wind. A
+nonzero constant meridional wind is rejected: it is not a stationary beta-plane
+Matsuno basic state and cannot be represented by this library's
+frequency/zonal-wavenumber filters without a separate meridional eigenproblem.
+The zonal option is consequently a Doppler approximation, not a full balanced
+mean-flow Matsuno solver.
+
 ## Built-in Wave Profiles
 
 The initial built-in profiles are ported from the reference project:
@@ -124,11 +148,13 @@ Plotting is intentionally outside the core package for now.
 
 Reference-project figure recipes live in `gallery/`. They are notebooks that
 show the API as the figure is made. The first gallery notebook regenerates the
-NOAA OLR symmetric and antisymmetric spectra PDFs:
+NOAA OLR symmetric and antisymmetric spectra PDFs, and the second displays the
+primary regions of every built-in filter, including a Doppler-shifted MRG:
 
 ```bash
 conda activate xr_ccew
 jupyter lab gallery/01_noaa_olr_spectra.ipynb
+jupyter lab gallery/02_wave_filter_regions.ipynb
 ```
 
 ## Test
