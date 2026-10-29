@@ -1,4 +1,8 @@
-"""Wave profile definitions and lookup helpers."""
+"""Wave profile definitions and lookup helpers.
+
+Built-in profiles are capped at 0.5 cycles per day for daily sampling.
+Custom profiles may use higher frequencies when the data support them.
+"""
 
 from __future__ import annotations
 
@@ -159,7 +163,7 @@ EQUATORIAL_ROSSBY_N0 = WaveProfile(
     k_min=2,
     k_max=14,
     frequency_min=0.0,
-    frequency_max=0.55,
+    frequency_max=0.5,
     equivalent_depth_min=8,
     equivalent_depth_max=90,
     symmetry="antisymmetric",
@@ -176,7 +180,7 @@ EQUATORIAL_ROSSBY_N1 = WaveProfile(
     k_min=-10,
     k_max=-1,
     frequency_min=1.0 / 30.0,
-    frequency_max=1.0,
+    frequency_max=0.5,
     equivalent_depth_min=8,
     equivalent_depth_max=90,
     symmetry="symmetric",
@@ -225,7 +229,7 @@ EASTWARD_INERTIAL_GRAVITY_N0 = WaveProfile(
     k_min=1,
     k_max=14,
     frequency_min=1.0 / 4.0,
-    frequency_max=0.55,
+    frequency_max=0.5,
     equivalent_depth_min=12,
     equivalent_depth_max=50,
     symmetry="antisymmetric",
@@ -242,7 +246,7 @@ WESTWARD_INERTIAL_GRAVITY_N2 = WaveProfile(
     k_min=-14,
     k_max=-1,
     frequency_min=0.0,
-    frequency_max=1.0,
+    frequency_max=0.5,
     equivalent_depth_min=12,
     equivalent_depth_max=90,
     symmetry="antisymmetric",
@@ -259,7 +263,7 @@ WESTWARD_INERTIAL_GRAVITY_N1 = WaveProfile(
     k_min=-14,
     k_max=-1,
     frequency_min=0.0,
-    frequency_max=1.0,
+    frequency_max=0.5,
     equivalent_depth_min=12,
     equivalent_depth_max=90,
     symmetry="symmetric",

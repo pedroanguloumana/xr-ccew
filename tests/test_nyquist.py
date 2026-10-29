@@ -36,7 +36,7 @@ class FrequencyCeilingTests(unittest.TestCase):
         self.assertAlmostEqual(eig0.frequency_ceiling, 0.40)
         self.assertEqual(eig0.name, "n=0 EIG")
         # the built-in profile itself is untouched
-        self.assertAlmostEqual(tw.wave_profile("n=0 EIG").frequency_max, 0.55)
+        self.assertAlmostEqual(tw.wave_profile("n=0 EIG").frequency_max, 0.5)
 
     def test_fraction_controls_the_ceiling(self):
         eig0 = tw.apply_frequency_ceiling("n=0 EIG", _time("D"), fraction=0.9)
@@ -50,7 +50,7 @@ class FrequencyCeilingTests(unittest.TestCase):
 
     def test_twice_daily_data_leaves_eig0_untruncated(self):
         eig0 = tw.apply_frequency_ceiling("n=0 EIG", _time("12h"))
-        self.assertAlmostEqual(eig0.frequency_max, 0.55)
+        self.assertAlmostEqual(eig0.frequency_max, 0.5)
         self.assertAlmostEqual(eig0.frequency_ceiling, 0.80)
 
     def test_band_entirely_above_ceiling_raises(self):

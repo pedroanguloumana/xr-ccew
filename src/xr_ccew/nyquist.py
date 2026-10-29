@@ -6,8 +6,9 @@ power close to Nyquist is unreliable. :func:`apply_frequency_ceiling`
 truncates a profile at a configurable fraction of the Nyquist frequency of the
 record it will be applied to, so the truncation is derived from the data's own
 time coordinate rather than hard-coded per call site. The n=0 EIG profile is
-the usual case: its high-wavenumber tail steepens towards two-day periods,
-which daily data cannot resolve, while its low-wavenumber portion is fine.
+the usual case: its high-wavenumber tail approaches the two-day Nyquist
+period of daily data, where phase information is lost, while its
+low-wavenumber portion is less affected.
 """
 
 from __future__ import annotations

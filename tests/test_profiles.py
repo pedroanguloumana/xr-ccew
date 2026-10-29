@@ -23,6 +23,16 @@ class ProfileTests(unittest.TestCase):
             ),
         )
 
+    def test_builtin_profiles_fit_daily_nyquist(self):
+        for profile in tw.wave_profiles("all"):
+            with self.subTest(profile=profile.name):
+                self.assertLessEqual(profile.frequency_max, 0.5)
+                if profile.wavenumber_frequency_polygon is not None:
+                    self.assertLessEqual(
+                        max(frequency for _, frequency in profile.wavenumber_frequency_polygon),
+                        0.5,
+                    )
+
     def test_alias_and_group_lookup(self):
         kelvin = tw.wave_profile("Kelvin")
         self.assertEqual(kelvin.name, "KW")

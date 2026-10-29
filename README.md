@@ -95,6 +95,10 @@ slow_kelvin = kelvin.with_updates(frequency_max=0.25)
 
 ## Frequency Ceiling
 
+All built-in wave profiles have a maximum frequency of 0.5 cycles per day,
+the Nyquist frequency of daily data. The Nyquist bin itself is sensitive to
+sampling phase, so a lower ceiling is preferable when filtering daily data.
+
 A sampled record only resolves frequencies below its Nyquist frequency, and
 the high-wavenumber tail of a dispersive profile such as `n=0 EIG` runs into
 it. Derive the truncation from the data's own time coordinate instead of
